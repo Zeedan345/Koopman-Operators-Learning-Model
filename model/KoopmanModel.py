@@ -32,9 +32,10 @@ class GNN(nn.Module):
         return edge_index
         
     def forward(self, data):
-        x, edge_index = data.x, data.edge_index
-        x = x.float()
-        edge_index = self.create_full_graph(x)
+        x = data.x.float()
+        # Use the edge_index provided in data instead of a full graph.
+        # edge_index = self.create_full_graph(x)
+        edge_index = data.edge_index  # Use the chain graph structure
         
         # GNN path
         gnn_x = self.conv1(x, edge_index).relu()
@@ -46,16 +47,14 @@ class GNN(nn.Module):
         gnn_x = self.conv3(gnn_x, edge_index).relu()
         gnn_x = self.norm3(gnn_x)
 
-        # FC path - fixed the layer usage
+        # FC path 
         fc_x = self.fc1(x).relu()
         fc_x = self.fc2(fc_x).relu() 
         fc_x = self.fc3(fc_x).relu()
         fc_x = self.fc4(fc_x)
 
-        # combined = torch.cat([gnn_x, fc_x], dim = 1)
-        # output = self.projection()
+        return (gnn_x + fc_x) / 2
 
-        return (gnn_x + fc_x)/2
     
 class AdvancedKoopmanModel(torch.nn.Module):
     def __init__(self, input_dim, koopman_dim, hidden_dim=128, u_dim =4):
@@ -103,21 +102,26 @@ class AdvancedKoopmanModel(torch.nn.Module):
 
     def forward(self, data):
         self.update_statistics(data.x)
+        
+
         koopman_states = self.encoder(data)
+        
 
         decoded_ae = self.decoder(Data(x=koopman_states, edge_index=data.edge_index))
-
-        g_hat = [koopman_states[0]] 
-        pred_states = []
-        for t in range(data.edge_attr.size(0)):
-            next_g = g_hat[-1] @ self.koopman_matrix + self.L(data.edge_attr[t])
-            g_hat.append(next_g)
-
-            pred_state = self.decoder(Data(x=next_g.unsqueeze(0), edge_index=data.edge_index[:, t:t+1]))
-            pred_states.append(pred_state)
+        T = data.x.shape[0]
+        g_hat = [koopman_states[0]]  # ĝ₁ = g₁
         
-        decoded_rollout = torch.cat(pred_states, dim=0)
+        for t in range(1, T):
+            u_t = data.edge_attr[t - 1]
+            next_g = g_hat[-1] @ self.koopman_matrix + self.L(u_t)
+            g_hat.append(next_g)
+        
+        g_hat = torch.stack(g_hat, dim=0)
+        
+        decoded_rollout = self.decoder(Data(x=g_hat, edge_index=data.edge_index))
+        
         return decoded_ae, decoded_rollout, koopman_states
+
     # def forward(self, data):
     #     # Update running statistics
     #     self.update_statistics(data.x)
