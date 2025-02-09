@@ -15,7 +15,7 @@ pid_phi = PIDController(kp=10.0, ki=0.05, kd=0.5)
 pid_theta = PIDController(kp=10.0, ki=0.05, kd=0.5)
 pid_psi = PIDController(kp=10.0, ki=0.05, kd=0.5)
 
-desired_pos = np.array([3, 9, 4])
+desired_pos = np.array([0.3, 0.9, 0.4])
 desired_yaw = 0.0
 dt = 0.01
 steps = 4000

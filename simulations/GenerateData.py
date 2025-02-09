@@ -15,13 +15,13 @@ def generate_pid_trajectory(env, steps=1000, dt=0.01):
     pid_psi = PIDController(kp=10.0, ki=0.05, kd=0.5)
 
     desired_pos = np.array([
-        np.random.uniform(0, 10),
-        np.random.uniform(0, 10),
-        np.random.uniform(1, 10)  # 1 because above ground
+        np.random.uniform(0, 1),
+        np.random.uniform(0, 1),
+        np.random.uniform(0.1, 1)  # 1 because above ground
     ])
     desired_yaw = 0.0  # Make it easier
     current_state = np.zeros(12)
-    current_state[2] = np.random.uniform(1, 5)
+    current_state[2] = np.random.uniform(0.1, 0.5)
 
     trajectory = [current_state]
     inputs_sequence = []
@@ -93,7 +93,7 @@ def create_graph_quad(trajectory, inputs_sequence):
 
     edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
     edge_attr = torch.tensor(np.array(edge_attr), dtype=torch.float)
-    x = torch.tensor(trajectory, dtype=torch.float)
+    x = torch.tensor(np.array(trajectory), dtype=torch.float)
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
 
 def generate_training_dataset(num_trajectories=100, steps=1000, dt=0.01):
@@ -104,13 +104,13 @@ def generate_training_dataset(num_trajectories=100, steps=1000, dt=0.01):
         trajectory, inputs_sequence, desired_pos = generate_pid_trajectory(env, steps, dt)
         data = create_graph_quad(trajectory, inputs_sequence)
         # Optional: attach the desired position to the data
-        data.desired_pos = torch.tensor(desired_pos, dtype=torch.float)
+        #data.desired_pos = torch.tensor(desired_pos, dtype=torch.float)
         dataset.append(data)
     return dataset
 
 data_save_folder = "data"
 os.makedirs(data_save_folder, exist_ok=True)
-data_save_path = os.path.join(data_save_folder, "pid_dataset_1.pth")
+data_save_path = os.path.join(data_save_folder, "pid_dataset_1_small.pth")
 
 dataset = generate_training_dataset(num_trajectories=100, steps=1000, dt=0.01)
 torch.save(dataset, data_save_path)

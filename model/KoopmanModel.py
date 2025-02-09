@@ -61,12 +61,14 @@ class AdvancedKoopmanModel(torch.nn.Module):
         super(AdvancedKoopmanModel, self).__init__()
         self.encoder = GNN(input_dim, hidden_dim, koopman_dim)
         self.decoder = GNN(koopman_dim, hidden_dim, input_dim)
+
         init_matrix = torch.zeros(koopman_dim, koopman_dim)
         for i in range(0, koopman_dim-1, 2):
             init_matrix[i:i+2, i:i+2] = torch.tensor([[0., -1.], [1., 0.]])
         self.koopman_matrix = torch.nn.Parameter(init_matrix)
         self.L = nn.Linear(u_dim, koopman_dim, bias=False)
         nn.init.normal_(self.L.weight, mean=0, std=0.1)
+
         self.register_buffer('running_mean', torch.zeros(input_dim))
         self.register_buffer('running_std', torch.ones(input_dim))
         self.register_buffer('num_batches_tracked', torch.tensor(0, dtype=torch.long))
@@ -103,24 +105,36 @@ class AdvancedKoopmanModel(torch.nn.Module):
     def forward(self, data):
         self.update_statistics(data.x)
         
-
+        # Encode the entire sequence
         koopman_states = self.encoder(data)
         
-
+        # Autoencoder reconstruction
         decoded_ae = self.decoder(Data(x=koopman_states, edge_index=data.edge_index))
-        T = data.x.shape[0]
-        g_hat = [koopman_states[0]]  # ĝ₁ = g₁
         
-        for t in range(1, T):
-            u_t = data.edge_attr[t - 1]
+        # Koopman rollout
+        T = data.x.shape[0]  # Total timesteps
+        g_hat = [koopman_states[0]]  # Initialize with g₁ (t=0 in code, t=1 in paper)
+        
+        for t in range(1, T):  # Iterate from t=1 to t=T-1 (0-based)
+            u_t = data.edge_attr[t - 1]  # Use u_{t-1} to compute ĝ_t
             next_g = g_hat[-1] @ self.koopman_matrix + self.L(u_t)
             g_hat.append(next_g)
         
         g_hat = torch.stack(g_hat, dim=0)
-        
         decoded_rollout = self.decoder(Data(x=g_hat, edge_index=data.edge_index))
         
         return decoded_ae, decoded_rollout, koopman_states
+    
+    def compute_losses(self, data, decoded_ae, decoded_rollout, koopman_states, lambda1=1.0, lambda2=1.0):
+        loss_ae = torch.mean(torch.norm(decoded_ae - data.x, dim=1))
+        loss_pred = torch.mean(torch.norm(decoded_rollout[1:] - data.x[1:], dim=1))  # Aligns with L_pred
+        dist_g = torch.cdist(koopman_states, koopman_states, p=2)
+        dist_x = torch.cdist(data.x, data.x, p=2)
+        loss_metric = torch.mean(torch.abs(dist_g - dist_x))
+        
+        # Total loss
+        total_loss = loss_ae + lambda1 * loss_pred + lambda2 * loss_metric
+        return total_loss, loss_ae, loss_pred, loss_metric
 
     # def forward(self, data):
     #     # Update running statistics
