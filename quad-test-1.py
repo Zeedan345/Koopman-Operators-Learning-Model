@@ -6,7 +6,7 @@ from model.KoopmanModel import AdvancedKoopmanModel
 from mpl_toolkits.mplot3d import Axes3D 
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
-dataset = torch.load("./data/pid_dataset_1_small.pth")
+dataset = torch.load("./data/pid_dataset_2_medium.pth")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.cuda.empty_cache()
 print(f"Using device: {device}")

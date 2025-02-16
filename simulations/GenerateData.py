@@ -6,81 +6,105 @@ from QuadcopterEnv import QuadcopterEnv
 from PIDController import PIDController
 
 def generate_pid_trajectory(env, steps=1000, dt=0.01):
-    pid_x = PIDController(kp=0.3, ki=0.04, kd=0.3)
-    pid_y = PIDController(kp=0.3, ki=0.04, kd=0.3)
-    pid_z = PIDController(kp=0.4, ki=0.05, kd=1.2) 
+    pid_rate_roll = PIDController(kp=0.005, ki=0.0006, kd=0.002)
+    pid_rate_pitch = PIDController(kp=0.005, ki=0.0006, kd=0.002)
+    pid_rate_yaw = PIDController(kp=0.005, ki=0.0006, kd=0.002)
 
-    pid_phi = PIDController(kp=10.0, ki=0.05, kd=0.5)
-    pid_theta = PIDController(kp=10.0, ki=0.05, kd=0.5)
-    pid_psi = PIDController(kp=10.0, ki=0.05, kd=0.5)
+    pid_angle_phi   = PIDController(kp=0.2, ki=0.02, kd=0.005)
+    pid_angle_theta = PIDController(kp=0.2, ki=0.02, kd=0.005)
+    pid_angle_psi   = PIDController(kp=0.1, ki=0.01, kd=0.002)
+
+    pid_pos_x = PIDController(kp=0.1, ki=0.0005, kd=0.7)
+    pid_pos_y = PIDController(kp=0.1, ki=0.0005, kd=0.7)
+    pid_pos_z = PIDController(kp=0.1, ki=0.0, kd=0.0)
+
+    
 
     desired_pos = np.array([
-        np.random.uniform(0, 1),
-        np.random.uniform(0, 1),
-        np.random.uniform(0.1, 1)  # 1 because above ground
+        np.random.uniform(0, 5),
+        np.random.uniform(0, 5),
+        np.random.uniform(0.1, 2)  # 1 because above ground
     ])
-    desired_yaw = 0.0  # Make it easier
+    psi_desired = 0.0
+
     current_state = np.zeros(12)
     current_state[2] = np.random.uniform(0.1, 0.5)
 
     trajectory = [current_state]
     inputs_sequence = []
 
-    for _ in range(steps):
+    thrust_history = []
+    max_motor_speed = 2000 
+
+    for step in range(steps):
         x, y, z = current_state[0:3]
         vx, vy, vz = current_state[3:6]
         phi, theta, psi = current_state[6:9]
+        rate_roll, rate_pitch, rate_yaw = current_state[9:12]
 
-        # Z Error and Control
-        error_z = desired_pos[2] - z
-        acc_z_desired = pid_z.compute(error_z, dt)
-        thrust = env.m * (acc_z_desired + env.g + (env.kd / env.m) * vz)
+        error_pos_x = desired_pos[0] - x
+        error_pos_y = desired_pos[1] - y
+        error_pos_z = desired_pos[2] - z
 
-        # X, Y Error and Control
-        error_x = desired_pos[0] - x
-        acc_x_desired = pid_x.compute(error_x, dt)
+        desired_acc_x = pid_pos_x.compute(error_pos_x, dt)
+        desired_acc_y = pid_pos_y.compute(error_pos_y, dt)
+        desired_acc_z = pid_pos_z.compute(error_pos_z, dt)
 
-        error_y = desired_pos[1] - y
-        acc_y_desired = pid_y.compute(error_y, dt)
+        thrust_nominal = env.m * env.g
+        desired_phi = (env.m/thrust_nominal) * (np.sin(psi) * desired_acc_x - np.cos(psi) * desired_acc_y)
+        desired_theta = (env.m/thrust_nominal) * (np.cos(psi) * desired_acc_x + np.sin(psi) * desired_acc_y)
+        desired_psi = psi_desired - psi
 
-        thrust = max(thrust, 1e-6)  # Prevent division by 0
-        desired_theta = (env.m / thrust) * acc_x_desired
-        desired_phi = - (env.m / thrust) * acc_y_desired
-
-        # Attitude Control
         error_phi = desired_phi - phi
-        tau_phi = pid_phi.compute(error_phi, dt)
-        
         error_theta = desired_theta - theta
-        tau_theta = pid_theta.compute(error_theta, dt)
-        
-        error_psi = desired_yaw - psi
-        tau_psi = pid_psi.compute(error_psi, dt)
+        error_psi = desired_psi - psi
 
-        # Motor Mixing
-        T_total = thrust / env.k  # Thrust scaling
+        desired_roll_rate = pid_angle_phi.compute(error_phi, dt)
+        desired_pitch_rate = pid_angle_theta.compute(error_theta, dt)
+        desired_psi_rate = pid_angle_psi.compute(error_psi, dt)
+
+        error_roll  = desired_roll_rate - rate_roll
+        error_pitch = desired_pitch_rate - rate_pitch
+        error_yaw   = desired_psi_rate - rate_yaw
+
+        tau_phi = pid_rate_roll.compute(error_roll, dt)
+        tau_theta = pid_rate_pitch.compute(error_pitch, dt)
+        tau_psi = pid_rate_yaw.compute(error_yaw, dt)
+
+        thrust = env.m * (env.g + desired_acc_z)
+
+        T_total = thrust / env.k
         a = tau_phi / (env.l * env.k)
-        b_tau_theta = tau_theta / (env.l * env.k)
-        c_tau_psi = tau_psi / env.b
+        b = tau_theta / (env.l * env.k)
+        c = tau_psi / env.b
 
-        w1 = (T_total + 2 * a + c_tau_psi) / 4
-        w2 = (T_total + 2 * b_tau_theta - c_tau_psi) / 4
-        w3 = (T_total - 2 * a + c_tau_psi) / 4
-        w4 = (T_total - 2 * b_tau_theta - c_tau_psi) / 4
+        raw_speeds = [
+            (T_total + 2*a + c) / 4,
+            (T_total + 2*b - c) / 4,
+            (T_total - 2*a + c) / 4,
+            (T_total - 2*b - c) / 4 
+        ]
 
-        w1 = max(w1, 0)
-        w2 = max(w2, 0)
-        w3 = max(w3, 0)
-        w4 = max(w4, 0)
-        
+
+        current_time = step * dt
+        for motor_idx, speed in enumerate(raw_speeds):
+            if speed > max_motor_speed:
+                print(f"[WARNING] Motor {motor_idx+1} exceeded MAX speed at {current_time:.2f}s: {speed:.2f} RPM")
+            elif speed < 0:
+                print(f"[WARNING] Motor {motor_idx+1} reversed at {current_time:.2f}s: {speed:.2f} RPM")
+
+
+        w1 = np.clip(raw_speeds[0], 0, max_motor_speed)
+        w2 = np.clip(raw_speeds[1], 0, max_motor_speed)
+        w3 = np.clip(raw_speeds[2], 0, max_motor_speed)
+        w4 = np.clip(raw_speeds[3], 0, max_motor_speed)
+
         inputs = [w1, w2, w3, w4]
-        inputs_sequence.append(inputs)  # Append the control inputs
+        inputs_sequence.append(inputs)
         
-        # Advance the simulation
         current_state = env.rk4_step(current_state, inputs, dt)
         trajectory.append(current_state)
     
-    # Return after completing all steps
     return trajectory, inputs_sequence, desired_pos
 
 def create_graph_quad(trajectory, inputs_sequence):
@@ -103,14 +127,13 @@ def generate_training_dataset(num_trajectories=100, steps=1000, dt=0.01):
     for _ in range(num_trajectories):
         trajectory, inputs_sequence, desired_pos = generate_pid_trajectory(env, steps, dt)
         data = create_graph_quad(trajectory, inputs_sequence)
-        # Optional: attach the desired position to the data
         #data.desired_pos = torch.tensor(desired_pos, dtype=torch.float)
         dataset.append(data)
     return dataset
 
 data_save_folder = "data"
 os.makedirs(data_save_folder, exist_ok=True)
-data_save_path = os.path.join(data_save_folder, "pid_dataset_1_small.pth")
+data_save_path = os.path.join(data_save_folder, "pid_dataset_2_medium.pth")
 
-dataset = generate_training_dataset(num_trajectories=100, steps=1000, dt=0.01)
+dataset = generate_training_dataset(num_trajectories=100, steps=2000, dt=0.01)
 torch.save(dataset, data_save_path)
