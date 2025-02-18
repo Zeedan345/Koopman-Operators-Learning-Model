@@ -21,9 +21,9 @@ def generate_pid_trajectory(env, steps=1000, dt=0.01):
     
 
     desired_pos = np.array([
-        np.random.uniform(0, 5),
-        np.random.uniform(0, 5),
-        np.random.uniform(0.1, 2)  # 1 because above ground
+        np.random.uniform(0, 1),
+        np.random.uniform(0, 1),
+        np.random.uniform(0.1, 0.5)  # 1 because above ground
     ])
     psi_desired = 0.0
 
@@ -133,7 +133,7 @@ def generate_training_dataset(num_trajectories=100, steps=1000, dt=0.01):
 
 data_save_folder = "data"
 os.makedirs(data_save_folder, exist_ok=True)
-data_save_path = os.path.join(data_save_folder, "pid_dataset_2_medium.pth")
+data_save_path = os.path.join(data_save_folder, "pid_dataset_2_medium_tiny.pth")
 
 dataset = generate_training_dataset(num_trajectories=100, steps=2000, dt=0.01)
 torch.save(dataset, data_save_path)

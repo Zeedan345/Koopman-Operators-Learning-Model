@@ -2,26 +2,44 @@ import torch
 import torch.nn as nn
 from torch_geometric.data import Data
 from torch_geometric.nn import GCNConv
+from torch_geometric.nn import MessagePassing
+
+class CustomMessagePassing(MessagePassing):
+    def __init__(self, in_channel, edge_dim,out_channel):
+        super(CustomMessagePassing, self).__init__(aggr="add")
+        self.mlp = nn.Sequential(
+            nn.Linear(2 * in_channel + edge_dim, out_channel),
+            nn.ReLU(),
+            nn.Linear(out_channel, out_channel)
+        )
+    def forward(self, x, edge_index, edge_attr):
+        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
+    def message(self, x_i, x_j, edge_attr):
+        m = torch.cat([x_i, x_j, edge_attr], dim=1)
+        return self.mlp(m)
+    def update(self, aggr_out):
+        return aggr_out
+
+
 
 
 class GNN(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+    def __init__(self, input_dim, hidden_dim, output_dim, edge_dim):
         super(GNN, self).__init__()
+
+        self.conv1 = CustomMessagePassing(in_channel=input_dim, edge_dim=edge_dim, out_channel=hidden_dim)
+        self.norm1 = nn.LayerNorm(hidden_dim)
         
+        self.conv2 = CustomMessagePassing(in_channel=hidden_dim, edge_dim=edge_dim, out_channel=hidden_dim//2)
+        self.norm2 = nn.LayerNorm(hidden_dim//2)
+        
+        self.conv3 = CustomMessagePassing(in_channel=hidden_dim//2, edge_dim=edge_dim, out_channel=output_dim)
+        self.norm3 = nn.LayerNorm(output_dim)
+
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)  
         self.fc3 = nn.Linear(hidden_dim, hidden_dim // 2)
         self.fc4 = nn.Linear(hidden_dim // 2, output_dim)
-        
-        self.conv1 = GCNConv(input_dim, hidden_dim)
-        self.conv2 = GCNConv(hidden_dim, hidden_dim // 2)
-        self.conv3 = GCNConv(hidden_dim // 2, output_dim)
-        
-        self.norm1 = nn.LayerNorm(hidden_dim)
-        self.norm2 = nn.LayerNorm(hidden_dim // 2)
-        self.norm3 = nn.LayerNorm(output_dim)
-
-        #self.projection = nn.Linear(hidden_dim * 2, ouput_dim)
 
     def create_full_graph(self, x):
         n = x.size(0)
@@ -33,18 +51,21 @@ class GNN(nn.Module):
         
     def forward(self, data):
         x = data.x.float()
-        # Use the edge_index provided in data instead of a full graph.
-        # edge_index = self.create_full_graph(x)
-        edge_index = data.edge_index  # Use the chain graph structure
-        
+        edge_index = data.edge_index
+        edge_attr = data.edge_attr
+
         # GNN path
-        gnn_x = self.conv1(x, edge_index).relu()
+        gnn_x = self.conv1(x, edge_index, edge_attr)
+        assert not torch.isnan(gnn_x).any(), "NaNs after conv1"
+        gnn_x = torch.relu(gnn_x)
         gnn_x = self.norm1(gnn_x)
         
-        gnn_x = self.conv2(gnn_x, edge_index).relu()
+        gnn_x = self.conv2(gnn_x, edge_index, edge_attr)
+        gnn_x = torch.relu(gnn_x)
         gnn_x = self.norm2(gnn_x)
 
-        gnn_x = self.conv3(gnn_x, edge_index).relu()
+        gnn_x = self.conv3(gnn_x, edge_index, edge_attr)
+        gnn_x = torch.relu(gnn_x)
         gnn_x = self.norm3(gnn_x)
 
         # FC path 
@@ -55,17 +76,27 @@ class GNN(nn.Module):
 
         return (gnn_x + fc_x) / 2
 
+
     
 class AdvancedKoopmanModel(torch.nn.Module):
-    def __init__(self, input_dim, koopman_dim, hidden_dim=128, u_dim =4):
+    def __init__(self, input_dim, koopman_dim, num_objects, h, hidden_dim=128, u_dim =4):
         super(AdvancedKoopmanModel, self).__init__()
-        self.encoder = GNN(input_dim, hidden_dim, koopman_dim)
-        self.decoder = GNN(koopman_dim, hidden_dim, input_dim)
 
-        init_matrix = torch.zeros(koopman_dim, koopman_dim)
-        for i in range(0, koopman_dim-1, 2):
-            init_matrix[i:i+2, i:i+2] = torch.tensor([[0., -1.], [1., 0.]])
-        self.koopman_matrix = torch.nn.Parameter(init_matrix)
+        self.num_objects = num_objects
+        self.m = koopman_dim //num_objects #embeddings per object
+        self.h = h #number of block types
+
+        self.encoder = GNN(input_dim, hidden_dim, koopman_dim, edge_dim=4)
+        self.decoder = GNN(koopman_dim, hidden_dim, input_dim, edge_dim=4)
+
+        self.koopman_blocks = nn.Parameter(torch.zeros(h, self.m, self.m))
+        for i in range(0, h, 2):
+            if self.m >= 2:
+                rotation = torch.tensor([[0.0, -1.0], [1.0, 0.0]])
+                self.koopman_blocks.data[i, :2, :2] = rotation
+
+        self.register_buffer('sigma', self.create_sigma(num_objects, h))
+
         self.L = nn.Linear(u_dim, koopman_dim, bias=False)
         nn.init.normal_(self.L.weight, mean=0, std=0.1)
 
@@ -73,6 +104,23 @@ class AdvancedKoopmanModel(torch.nn.Module):
         self.register_buffer('running_std', torch.ones(input_dim))
         self.register_buffer('num_batches_tracked', torch.tensor(0, dtype=torch.long))
 
+    def create_sigma(self, num_objects, h):
+        sigma = torch.zeros(num_objects, num_objects, h)
+        for i in range(num_objects):
+            for j in range(num_objects):
+                if i==j:
+                    sigma[i, j, 0] = 1.0
+                else:
+                    if h>1:
+                        sigma[i, j, 0] = 1.0
+                    else:
+                        sigma[i, j, 0] = 1.0
+        return sigma
+    def compute_koopman_matrix(self):
+        sigma_expanded = self.sigma.unsqueeze(-1).unsqueeze(-1)
+        K_blocks = (sigma_expanded * self.koopman_blocks).sum(dim=2)
+        K = K_blocks.permute(0, 2, 1, 3).contiguous().view(self.num_objects * self.m, self.num_objects * self.m)
+        return K
     def update_statistics(self, x):
         if self.training:
             with torch.no_grad():
@@ -105,23 +153,22 @@ class AdvancedKoopmanModel(torch.nn.Module):
     def forward(self, data):
         self.update_statistics(data.x)
         
-        # Encode the entire sequence
         koopman_states = self.encoder(data)
         
-        # Autoencoder reconstruction
-        decoded_ae = self.decoder(Data(x=koopman_states, edge_index=data.edge_index))
+        decoded_ae = self.decoder(Data(x=koopman_states, edge_index=data.edge_index, edge_attr=data.edge_attr))
+        K = self.compute_koopman_matrix()
         
-        # Koopman rollout
+
         T = data.x.shape[0]  # Total timesteps
-        g_hat = [koopman_states[0]]  # Initialize with g₁ (t=0 in code, t=1 in paper)
+        g_hat = [koopman_states[0]]  # Initialize with g₁
         
-        for t in range(1, T):  # Iterate from t=1 to t=T-1 (0-based)
-            u_t = data.edge_attr[t - 1]  # Use u_{t-1} to compute ĝ_t
-            next_g = g_hat[-1] @ self.koopman_matrix + self.L(u_t)
+        for t in range(1, T):
+            u_t = data.edge_attr[t - 1] 
+            next_g = g_hat[-1] @ K + self.L(u_t)
             g_hat.append(next_g)
         
         g_hat = torch.stack(g_hat, dim=0)
-        decoded_rollout = self.decoder(Data(x=g_hat, edge_index=data.edge_index))
+        decoded_rollout = self.decoder(Data(x=g_hat, edge_index=data.edge_index, edge_attr=data.edge_attr))
         
         return decoded_ae, decoded_rollout, koopman_states
     
@@ -131,23 +178,8 @@ class AdvancedKoopmanModel(torch.nn.Module):
         dist_g = torch.cdist(koopman_states, koopman_states, p=2)
         dist_x = torch.cdist(data.x, data.x, p=2)
         loss_metric = torch.mean(torch.abs(dist_g - dist_x))
+        print(f"Loss AE: {loss_ae.item()} Loss Pred: {loss_pred.item()} Metric Loss: {loss_metric.item()}")
         
         # Total loss
         total_loss = loss_ae + lambda1 * loss_pred + lambda2 * loss_metric
         return total_loss, loss_ae, loss_pred, loss_metric
-
-    # def forward(self, data):
-    #     # Update running statistics
-    #     self.update_statistics(data.x)
-    
-    #     # Normalize input
-    #     x_normalized = (data.x - self.running_mean) / (self.running_std + 1e-5)
-    #     data_normalized = Data(x=x_normalized, edge_index=data.edge_index)
-        
-    #     # Rest of the forward pass
-    #     koopman_space = self.encoder(data_normalized)
-    #     next_koopman_space = koopman_space @ self.koopman_matrix
-    #     new_data = Data(x=next_koopman_space, edge_index=data.edge_index)
-    #     decoded_state = self.decoder(new_data)
-        
-    #     return decoded_state
