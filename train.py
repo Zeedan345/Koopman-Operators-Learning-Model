@@ -13,7 +13,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.cuda.empty_cache()
 print(f"Using device: {device}")
 
-def train_advanced_model(model, dataset, epochs=10, lr=0.0001, lambda1=0.5, lambda2=0.2):
+def train_advanced_model(model, dataset, epochs=15, lr=0.0001, lambda1=0.5, lambda2=0.2):
     optimizer = Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min',
                                                            factor=0.5, patience=5, verbose=True)
@@ -35,6 +35,11 @@ def train_advanced_model(model, dataset, epochs=10, lr=0.0001, lambda1=0.5, lamb
                 data, decoded_ae, decoded_rollout, koopman_states, 
                 lambda1=lambda1, lambda2=lambda2
             )
+            # if epoch < 3:
+            #     total_loss = Lae + lambda2 * Lmetric
+            # else:
+            #     total_loss = Lae + lambda1 * Lpred + lambda2 * Lmetric
+
             # Check loss before backward
             # try:
             #     loss_val = total_loss.item()
@@ -43,8 +48,12 @@ def train_advanced_model(model, dataset, epochs=10, lr=0.0001, lambda1=0.5, lamb
             #     print("Error converting total_loss to float:", e)
 
             total_loss.backward()
+            # for name, param in model.named_parameters():
+            #     if 'koopman_blocks' in name and param.grad is not None:
+            #         print("koopman_blocks.grad norm:", param.grad.norm().item())
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            
 
             # # Check model parameters after update
             # for name, param in model.named_parameters():
@@ -67,13 +76,13 @@ def train_advanced_model(model, dataset, epochs=10, lr=0.0001, lambda1=0.5, lamb
 
 
 dataset = torch.load("./data/pid_dataset_2_medium.pth")
-model = AdvancedKoopmanModel(input_dim=12, koopman_dim=48, num_objects=4, h=4).to(device)
+model = AdvancedKoopmanModel(input_dim=12, koopman_dim=64, num_objects=4, h=4).to(device)
 
 
 losses = train_advanced_model(model, dataset, lambda1=0.5, lambda2=0.2)
 
 save_folder = "quadcopter-koopman-models"
 os.makedirs(save_folder, exist_ok=True)
-save_path = os.path.join(save_folder, "quadcopter-koopman-model-updated.pth")
+save_path = os.path.join(save_folder, "quadcopter-koopman-model-02-v1.2.pth")
 torch.save(model.state_dict(), save_path)
 print(f"Model saved to {save_path}")

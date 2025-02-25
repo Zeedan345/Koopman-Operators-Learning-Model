@@ -133,7 +133,7 @@ def generate_training_dataset(num_trajectories=100, steps=1000, dt=0.01):
 
 data_save_folder = "data"
 os.makedirs(data_save_folder, exist_ok=True)
-data_save_path = os.path.join(data_save_folder, "pid_dataset_2_medium_tiny.pth")
+data_save_path = os.path.join(data_save_folder, "pid_dataset_test_tiny.pth")
 
-dataset = generate_training_dataset(num_trajectories=100, steps=2000, dt=0.01)
+dataset = generate_training_dataset(num_trajectories=100, steps=100, dt=0.01)
 torch.save(dataset, data_save_path)

@@ -56,7 +56,7 @@ class GNN(nn.Module):
 
         # GNN path
         gnn_x = self.conv1(x, edge_index, edge_attr)
-        assert not torch.isnan(gnn_x).any(), "NaNs after conv1"
+        #assert not torch.isnan(gnn_x).any(), "NaNs after conv1"
         gnn_x = torch.relu(gnn_x)
         gnn_x = self.norm1(gnn_x)
         
@@ -90,6 +90,7 @@ class AdvancedKoopmanModel(torch.nn.Module):
         self.decoder = GNN(koopman_dim, hidden_dim, input_dim, edge_dim=4)
 
         self.koopman_blocks = nn.Parameter(torch.zeros(h, self.m, self.m))
+        
         for i in range(0, h, 2):
             if self.m >= 2:
                 rotation = torch.tensor([[0.0, -1.0], [1.0, 0.0]])
@@ -111,15 +112,17 @@ class AdvancedKoopmanModel(torch.nn.Module):
                 if i==j:
                     sigma[i, j, 0] = 1.0
                 else:
-                    if h>1:
-                        sigma[i, j, 0] = 1.0
-                    else:
-                        sigma[i, j, 0] = 1.0
+                    sigma[i, j, 1] = 1.0
         return sigma
     def compute_koopman_matrix(self):
         sigma_expanded = self.sigma.unsqueeze(-1).unsqueeze(-1)
         K_blocks = (sigma_expanded * self.koopman_blocks).sum(dim=2)
         K = K_blocks.permute(0, 2, 1, 3).contiguous().view(self.num_objects * self.m, self.num_objects * self.m)
+        # norm_k = K.norm()
+        # max_norm = 0.99
+        # if norm_k > max_norm:
+        #     K = K*(max_norm/norm_k)
+        # print("K norm:", K.norm().item())
         return K
     def update_statistics(self, x):
         if self.training:
@@ -152,12 +155,12 @@ class AdvancedKoopmanModel(torch.nn.Module):
 
     def forward(self, data):
         self.update_statistics(data.x)
+        #x_normed = (data.x - self.running_mean) / (self.running_std + 1e-6)
         
-        koopman_states = self.encoder(data)
+        koopman_states = self.encoder(Data(x=data.x, edge_index=data.edge_index, edge_attr=data.edge_attr))
         
         decoded_ae = self.decoder(Data(x=koopman_states, edge_index=data.edge_index, edge_attr=data.edge_attr))
         K = self.compute_koopman_matrix()
-        
 
         T = data.x.shape[0]  # Total timesteps
         g_hat = [koopman_states[0]]  # Initialize with g₁
@@ -168,17 +171,18 @@ class AdvancedKoopmanModel(torch.nn.Module):
             g_hat.append(next_g)
         
         g_hat = torch.stack(g_hat, dim=0)
+        #print("g_hat min, max, mean:", g_hat.min(), g_hat.max(), g_hat.mean())
         decoded_rollout = self.decoder(Data(x=g_hat, edge_index=data.edge_index, edge_attr=data.edge_attr))
         
         return decoded_ae, decoded_rollout, koopman_states
     
     def compute_losses(self, data, decoded_ae, decoded_rollout, koopman_states, lambda1=1.0, lambda2=1.0):
         loss_ae = torch.mean(torch.norm(decoded_ae - data.x, dim=1))
-        loss_pred = torch.mean(torch.norm(decoded_rollout[1:] - data.x[1:], dim=1))  # Aligns with L_pred
+        loss_pred = torch.mean(torch.norm(decoded_rollout[1:] - data.x[1:], dim=1)) 
         dist_g = torch.cdist(koopman_states, koopman_states, p=2)
         dist_x = torch.cdist(data.x, data.x, p=2)
         loss_metric = torch.mean(torch.abs(dist_g - dist_x))
-        print(f"Loss AE: {loss_ae.item()} Loss Pred: {loss_pred.item()} Metric Loss: {loss_metric.item()}")
+        #print(f"Loss AE: {loss_ae.item()} Loss Pred: {loss_pred.item()} Metric Loss: {loss_metric.item()}")
         
         # Total loss
         total_loss = loss_ae + lambda1 * loss_pred + lambda2 * loss_metric

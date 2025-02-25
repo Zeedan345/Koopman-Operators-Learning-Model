@@ -11,12 +11,12 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.cuda.empty_cache()
 print(f"Using device: {device}")
 # Set the model to evaluation mode
-model = AdvancedKoopmanModel(input_dim=12, koopman_dim=48).to(device)
-model.load_state_dict(torch.load("./quadcopter-koopman-models/quadcopter-koopman-model-5.5_small.pth", weights_only=True))
+model = AdvancedKoopmanModel(input_dim=12, koopman_dim=64, num_objects=4, h=4).to(device)
+model.load_state_dict(torch.load("./quadcopter-koopman-models/quadcopter-koopman-model-02-v1.2.pth", weights_only=True))
 model.eval()
 
 # Choose a sample from the dataset; here we use the first sample
-sample_index = 6
+sample_index = 0
 sample_data = dataset[sample_index].to(device)
 
 with torch.no_grad():
