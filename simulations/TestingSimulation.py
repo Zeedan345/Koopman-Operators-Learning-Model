@@ -20,12 +20,25 @@ pid_pos_y = PIDController(kp=0.1, ki=0.0005, kd=0.7)
 pid_pos_z = PIDController(kp=0.1, ki=0.0, kd=0.0)
 
 
-desired_pos = np.array([6, 7, 4])
+# desired_pos = np.array([6, 7, 4])
+
+# Making Array for the qaudcopter to follow
+x = np.linspace(0, 20, 50)
+y=x**0.5
+desired_pos_array = np.column_stack((x, y))
+z_const = 4
+z_column = np.full((desired_pos_array.shape[0], 1), z_const)
+desired_pos_array_3d = np.hstack((desired_pos_array, z_column))
+
+waypoint_idx = 0
+waypoint_threshold = 0.5
+update_inteval = 5 #100/5 = 20hz
+
 desired_rate = np.array([0.1, 0.1, 0.1])
 desired_angle = np.array([0.2, 0.3, 0.4])
 psi_desired = 0.0
 dt = 0.01
-steps = 2000
+steps = 6000
 current_state = np.zeros(12)
 trajectory = [current_state]
 
@@ -36,6 +49,13 @@ for step in range(steps):
     vx, vy, vz = current_state[3:6]
     phi, theta, psi = current_state[6:9]
     rate_roll, rate_pitch, rate_yaw = current_state[9:12]
+
+    if step % update_inteval == 0:
+        current_waypoint = desired_pos_array_3d[waypoint_idx]
+        distance_to_waypoint = np.linalg.norm(current_waypoint - np.array([x, y, z]))
+        if distance_to_waypoint < waypoint_threshold and waypoint_idx < len(desired_pos_array_3d) - 1:
+            waypoint_idx += 1
+    desired_pos = desired_pos_array_3d[waypoint_idx]
 
     error_pos_x = desired_pos[0] - x
     error_pos_y = desired_pos[1] - y

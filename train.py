@@ -83,6 +83,6 @@ losses = train_advanced_model(model, dataset, lambda1=0.5, lambda2=0.2)
 
 save_folder = "quadcopter-koopman-models"
 os.makedirs(save_folder, exist_ok=True)
-save_path = os.path.join(save_folder, "quadcopter-koopman-model-02-v1.2.pth")
+save_path = os.path.join(save_folder, "quadcopter-koopman-model-02-v1.4.pth")
 torch.save(model.state_dict(), save_path)
 print(f"Model saved to {save_path}")
