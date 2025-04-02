@@ -21,23 +21,21 @@ class CustomMessagePassing(MessagePassing):
         return aggr_out
 
 
-
-
 class GNN(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, edge_dim):
         super(GNN, self).__init__()
 
         self.conv1 = CustomMessagePassing(in_channel=input_dim, edge_dim=edge_dim, out_channel=hidden_dim)
         self.norm1 = nn.LayerNorm(hidden_dim)
-        
+
         self.conv2 = CustomMessagePassing(in_channel=hidden_dim, edge_dim=edge_dim, out_channel=hidden_dim//2)
         self.norm2 = nn.LayerNorm(hidden_dim//2)
-        
+
         self.conv3 = CustomMessagePassing(in_channel=hidden_dim//2, edge_dim=edge_dim, out_channel=output_dim)
         self.norm3 = nn.LayerNorm(output_dim)
 
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)  
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, hidden_dim // 2)
         self.fc4 = nn.Linear(hidden_dim // 2, output_dim)
 
@@ -48,7 +46,7 @@ class GNN(nn.Module):
             torch.tile(torch.arange(n), (n,))
         ]).to(x.device)
         return edge_index
-        
+
     def forward(self, data):
         x = data.x.float()
         edge_index = data.edge_index
@@ -59,7 +57,7 @@ class GNN(nn.Module):
         #assert not torch.isnan(gnn_x).any(), "NaNs after conv1"
         gnn_x = torch.relu(gnn_x)
         gnn_x = self.norm1(gnn_x)
-        
+
         gnn_x = self.conv2(gnn_x, edge_index, edge_attr)
         gnn_x = torch.relu(gnn_x)
         gnn_x = self.norm2(gnn_x)
@@ -68,16 +66,15 @@ class GNN(nn.Module):
         gnn_x = torch.relu(gnn_x)
         gnn_x = self.norm3(gnn_x)
 
-        # FC path 
+        # FC path
         fc_x = self.fc1(x).relu()
-        fc_x = self.fc2(fc_x).relu() 
+        fc_x = self.fc2(fc_x).relu()
         fc_x = self.fc3(fc_x).relu()
         fc_x = self.fc4(fc_x)
 
         return (gnn_x + fc_x) / 2
 
 
-    
 class AdvancedKoopmanModel(torch.nn.Module):
     def __init__(self, input_dim, koopman_dim, num_objects, h, hidden_dim=128, u_dim =4):
         super(AdvancedKoopmanModel, self).__init__()
@@ -90,16 +87,26 @@ class AdvancedKoopmanModel(torch.nn.Module):
         self.decoder = GNN(koopman_dim, hidden_dim, input_dim, edge_dim=4)
 
         self.koopman_blocks = nn.Parameter(torch.zeros(h, self.m, self.m))
-        
+
         for i in range(0, h, 2):
             if self.m >= 2:
                 rotation = torch.tensor([[0.0, -1.0], [1.0, 0.0]])
                 self.koopman_blocks.data[i, :2, :2] = rotation
 
         self.register_buffer('sigma', self.create_sigma(num_objects, h))
+        self.register_buffer('running_mean_u', torch.zeros(u_dim))
+        self.register_buffer('running_std_u', torch.ones(u_dim))
 
         self.L = nn.Linear(u_dim, koopman_dim, bias=False)
         nn.init.normal_(self.L.weight, mean=0, std=0.1)
+
+        self.modulation = nn.Linear(u_dim, koopman_dim, bias=False)
+        nn.init.normal_(self.modulation.weight, mean=0, std=0.1)
+
+        self.B = nn.ParameterList([
+            nn.Parameter(torch.zeros(koopman_dim, koopman_dim))
+            for _ in range(u_dim)
+        ])
 
         self.register_buffer('running_mean', torch.zeros(input_dim))
         self.register_buffer('running_std', torch.ones(input_dim))
@@ -124,20 +131,30 @@ class AdvancedKoopmanModel(torch.nn.Module):
         #     K = K*(max_norm/norm_k)
         # print("K norm:", K.norm().item())
         return K
-    def update_statistics(self, x):
+    def update_statistics(self, x, edge_attr):
         if self.training:
             with torch.no_grad():
-                batch_mean = x.mean(dim=0)
-                batch_std = x.std(dim=0)
-                
+                # Update state statistics
+                batch_mean_x = x.mean(dim=0)
+                batch_std_x = x.std(dim=0)
                 if self.num_batches_tracked == 0:
-                    self.running_mean = batch_mean
-                    self.running_std = batch_std
+                    self.running_mean = batch_mean_x
+                    self.running_std = batch_std_x
                 else:
                     momentum = 0.1
-                    self.running_mean = (1 - momentum) * self.running_mean + momentum * batch_mean
-                    self.running_std = (1 - momentum) * self.running_std + momentum * batch_std
-                
+                    self.running_mean = (1 - momentum) * self.running_mean + momentum * batch_mean_x
+                    self.running_std = (1 - momentum) * self.running_std + momentum * batch_std_x
+
+                # Update control input statistics
+                batch_mean_u = edge_attr.mean(dim=0)  # Mean over time dimension
+                batch_std_u = edge_attr.std(dim=0)    # Std over time dimension
+                if self.num_batches_tracked == 0:
+                    self.running_mean_u = batch_mean_u
+                    self.running_std_u = batch_std_u
+                else:
+                    self.running_mean_u = (1 - momentum) * self.running_mean_u + momentum * batch_mean_u
+                    self.running_std_u = (1 - momentum) * self.running_std_u + momentum * batch_std_u
+
                 self.num_batches_tracked += 1
 
     def metric_loss(self, g, states):
@@ -154,36 +171,38 @@ class AdvancedKoopmanModel(torch.nn.Module):
         return A
 
     def forward(self, data):
-        self.update_statistics(data.x)
-        #x_normed = (data.x - self.running_mean) / (self.running_std + 1e-6)
-        
-        koopman_states = self.encoder(Data(x=data.x, edge_index=data.edge_index, edge_attr=data.edge_attr))
-        
+        self.update_statistics(data.x, data.edge_attr)
+        x_normed = (data.x - self.running_mean) / (self.running_std + 1e-6)
+        koopman_states = self.encoder(Data(x=x_normed, edge_index=data.edge_index, edge_attr=data.edge_attr))
         decoded_ae = self.decoder(Data(x=koopman_states, edge_index=data.edge_index, edge_attr=data.edge_attr))
         K = self.compute_koopman_matrix()
 
-        T = data.x.shape[0]  # Total timesteps
-        g_hat = [koopman_states[0]]  # Initialize with g₁
-        
+        T = data.x.shape[0]
+        g_hat = [koopman_states[0]]
+
         for t in range(1, T):
-            u_t = data.edge_attr[t - 1] 
-            next_g = g_hat[-1] @ K + self.L(u_t)
+            u_t_raw = data.edge_attr[t - 1]
+            u_t = (u_t_raw - self.running_mean_u) / (self.running_std_u + 1e-6)
+            bilinear_term = 0
+            for i in range(u_t.shape[0]):
+                bilinear_term += u_t[i] * (g_hat[-1] @ self.B[i])
+            next_g = g_hat[-1] @ K + bilinear_term + self.L(u_t)
             g_hat.append(next_g)
-        
+
         g_hat = torch.stack(g_hat, dim=0)
-        #print("g_hat min, max, mean:", g_hat.min(), g_hat.max(), g_hat.mean())
         decoded_rollout = self.decoder(Data(x=g_hat, edge_index=data.edge_index, edge_attr=data.edge_attr))
-        
         return decoded_ae, decoded_rollout, koopman_states
-    
-    def compute_losses(self, data, decoded_ae, decoded_rollout, koopman_states, lambda1=1.0, lambda2=1.0):
+
+    def compute_losses(self, data, decoded_ae, decoded_rollout, koopman_states, lambda1=1.0, lambda2=1.0, lambda3=1e-3):
         loss_ae = torch.mean(torch.norm(decoded_ae - data.x, dim=1))
-        loss_pred = torch.mean(torch.norm(decoded_rollout[1:] - data.x[1:], dim=1)) 
+        loss_pred = torch.mean(torch.norm(decoded_rollout[1:] - data.x[1:], dim=1))
+
         dist_g = torch.cdist(koopman_states, koopman_states, p=2)
         dist_x = torch.cdist(data.x, data.x, p=2)
         loss_metric = torch.mean(torch.abs(dist_g - dist_x))
-        #print(f"Loss AE: {loss_ae.item()} Loss Pred: {loss_pred.item()} Metric Loss: {loss_metric.item()}")
-        
-        # Total loss
-        total_loss = loss_ae + lambda1 * loss_pred + lambda2 * loss_metric
-        return total_loss, loss_ae, loss_pred, loss_metric
+
+        # Regularization on the bilinear parameters B
+        loss_bilinear = sum(torch.norm(b, p='fro') for b in self.B)
+
+        total_loss = loss_ae + lambda1 * loss_pred + lambda2 * loss_metric + lambda3 * loss_bilinear
+        return total_loss, loss_ae, loss_pred, loss_metric, loss_bilinear
