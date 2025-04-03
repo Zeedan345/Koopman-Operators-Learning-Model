@@ -34,10 +34,10 @@ class GNN(nn.Module):
         self.conv3 = CustomMessagePassing(in_channel=hidden_dim//2, edge_dim=edge_dim, out_channel=output_dim)
         self.norm3 = nn.LayerNorm(output_dim)
 
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, hidden_dim // 2)
-        self.fc4 = nn.Linear(hidden_dim // 2, output_dim)
+        # self.fc1 = nn.Linear(input_dim, hidden_dim)
+        # self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        # self.fc3 = nn.Linear(hidden_dim, hidden_dim // 2)
+        # self.fc4 = nn.Linear(hidden_dim // 2, output_dim)
 
     def create_full_graph(self, x):
         n = x.size(0)
@@ -66,13 +66,14 @@ class GNN(nn.Module):
         gnn_x = torch.relu(gnn_x)
         gnn_x = self.norm3(gnn_x)
 
-        # FC path
-        fc_x = self.fc1(x).relu()
-        fc_x = self.fc2(fc_x).relu()
-        fc_x = self.fc3(fc_x).relu()
-        fc_x = self.fc4(fc_x)
+        # # FC path
+        # fc_x = self.fc1(x).relu()
+        # fc_x = self.fc2(fc_x).relu()
+        # fc_x = self.fc3(fc_x).relu()
+        # fc_x = self.fc4(fc_x)
 
-        return (gnn_x + fc_x) / 2
+        return gnn_x
+        # return (gnn_x + fc_x) / 2
 
 
 class AdvancedKoopmanModel(torch.nn.Module):
@@ -93,7 +94,7 @@ class AdvancedKoopmanModel(torch.nn.Module):
                 rotation = torch.tensor([[0.0, -1.0], [1.0, 0.0]])
                 self.koopman_blocks.data[i, :2, :2] = rotation
 
-        self.register_buffer('sigma', self.create_sigma(num_objects, h))
+        self.register_buffer('sigma', self.create_sigma(num_objects, h, self.m))
         self.register_buffer('running_mean_u', torch.zeros(u_dim))
         self.register_buffer('running_std_u', torch.ones(u_dim))
 
@@ -112,14 +113,22 @@ class AdvancedKoopmanModel(torch.nn.Module):
         self.register_buffer('running_std', torch.ones(input_dim))
         self.register_buffer('num_batches_tracked', torch.tensor(0, dtype=torch.long))
 
-    def create_sigma(self, num_objects, h):
-        sigma = torch.zeros(num_objects, num_objects, h)
-        for i in range(num_objects):
-            for j in range(num_objects):
-                if i==j:
+    def create_sigma(self, state_dim, h, m):
+        sigma = torch.zeros(state_dim, state_dim, h)
+
+        for i in range(state_dim):
+            for j in range(state_dim):
+                if i == j:  # Self-relation for state element
                     sigma[i, j, 0] = 1.0
-                else:
+                elif (i < 3 and j < 3) or (i >= 3 and i < 6 and j >= 3 and j < 6):
+                    # Position-Position or Orientation-Orientation
                     sigma[i, j, 1] = 1.0
+                elif (i < 3 and j >= 3 and j < 6) or (i >= 3 and i < 6 and j < 3):
+                    # Position-Orientation
+                    sigma[i, j, 2] = 1.0
+                else:
+                    # Other relations
+                    sigma[i, j, 3] = 1.0
         return sigma
     def compute_koopman_matrix(self):
         sigma_expanded = self.sigma.unsqueeze(-1).unsqueeze(-1)

@@ -13,10 +13,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.cuda.empty_cache()
 print(f"Using device: {device}")
 
-def train_advanced_model(model, dataset, epochs=50, lr=0.0001, lambda1=0.5, lambda2=0.2, lambda3 = 1e-3):
+def train_advanced_model(model, dataset, epochs=15, lr=0.0001, lambda1=0.5, lambda2=0.2, lambda3 = 1e-3):
     optimizer = Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min',
-                                                           factor=0.5, patience=5, verbose=True)
+                                                           factor=0.5, patience=3, verbose=True)
     train_losses = []
 
     for epoch in range(epochs):
@@ -78,7 +78,7 @@ def train_advanced_model(model, dataset, epochs=50, lr=0.0001, lambda1=0.5, lamb
     return train_losses
 
 
-dataset = torch.load("./data/pid_dataset_2_big.pth")
+dataset = torch.load("./data/pid_dataset_2_medium.pth")
 model = AdvancedKoopmanModel(input_dim=12, koopman_dim=64, num_objects=4, h=4).to(device)
 
 
@@ -86,6 +86,6 @@ losses = train_advanced_model(model, dataset, lambda1=1.0, lambda2=0.3, lambda3=
 
 save_folder = "quadcopter-koopman-models"
 os.makedirs(save_folder, exist_ok=True)
-save_path = os.path.join(save_folder, "quadcopter-koopman-model-02-v2.1.pth")
+save_path = os.path.join(save_folder, "quadcopter-koopman-model-02-v2.2.pth")
 torch.save(model.state_dict(), save_path)
 print(f"Model saved to {save_path}")
